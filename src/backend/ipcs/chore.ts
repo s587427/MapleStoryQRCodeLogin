@@ -5,9 +5,8 @@ import {
   IPC_SYSTEM_OPEN_EXTERNAL,
   VK,
 } from "@/const"
-import { ipcMain, shell } from "electron"
+import { clipboard, ipcMain, shell } from "electron"
 import Store from "electron-store"
-import { setClipboard } from "../utils/clipboard"
 import { win } from "../utils/koffi"
 
 const store = new Store()
@@ -34,13 +33,13 @@ ipcMain.on(
 
       await new Promise((resolve) => setTimeout(resolve, 200))
 
-      setClipboard(account)
+      clipboard.writeText(account)
       await win.pressKeys([VK.CONTROL, VK.A])
       await win.pressKeys([VK.BACK])
       await win.pressKeys([VK.CONTROL, VK.V])
       await win.pressKeys([VK.TAB])
 
-      setClipboard(password)
+      clipboard.writeText(password)
       await win.pressKeys([VK.CONTROL, VK.V])
       await win.pressKeys([VK.Enter])
     } else {

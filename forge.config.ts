@@ -12,6 +12,9 @@ const config: ForgeConfig = {
     asar: true,
     icon: "./src/assets/icon",
     extraResource: ["./src/assets", "./node_modules/koffi"],
+    win32metadata: {
+      "requested-execution-level": "requireAdministrator",
+    },
   },
   rebuildConfig: {},
   makers: [

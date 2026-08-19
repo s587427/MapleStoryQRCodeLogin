@@ -23,3 +23,9 @@ export interface GetInitLoginResponse {
   LogMessage: string
   ResultMessage: string
 }
+
+export interface OtpV2Response {
+  result: 0 | 1
+  data: string
+  message: null | string
+}

@@ -1,7 +1,9 @@
-import { GetInitLoginResponse } from "@/types/response"
+import { GetInitLoginResponse, OtpV2Response } from "@/types/response"
 import crypto from "crypto"
 import { session } from "electron"
-import { beanfunFetch } from "./request"
+import { decodeLaunchData } from "../helpers/launch"
+import { resolveClientIntegrity } from "../helpers/resolve_client_integrity"
+import { BEAN_FUN_HOST, beanfunFetch } from "./request"
 
 export interface ServiceAccount {
   clickable: boolean
@@ -20,9 +22,9 @@ async function getAccounts(
   webToken: string,
   serviceCode: string,
   serviceRegion: string,
-  fatal: boolean = true
+  fatal = true
 ): Promise<GetAccountsResult> {
-  const host: string = "tw.beanfun.com"
+  const host = "tw.beanfun.com"
 
   // 先打 auth.aspx 初始化
   await beanfunFetch(
@@ -111,14 +113,11 @@ async function getAccounts(
 
 async function getOTP(
   serviceAccount: ServiceAccount,
-  serviceCode: string = "610074",
-  serviceRegion: string = "T9"
+  serviceCode = "610074",
+  serviceRegion = "T9"
 ) {
-  const host = "tw.beanfun.com"
-  const loginHost = "tw.newlogin.beanfun.com"
-
   const beanfunCookies = await session.defaultSession.cookies.get({
-    url: `https://${host}`,
+    url: `https://${BEAN_FUN_HOST}`,
   })
 
   const webToken = beanfunCookies.find(
@@ -128,64 +127,39 @@ async function getOTP(
   // ===============================
   // Step1: game_start_step2.aspx
   // ===============================
+  // 1. long_polling_key can regx GetResultByLongPolling
+  // 2. unk_data can regx
+  // 3. screatetime can direct get
+  // 4. page_url can direct get
+  // 5. launch can regex m_objData
+  //  5-1 sn
+  //  5-2 data
+  //  5-3 web_token?
+  //  5-4 secret_code?
 
-  const gameStartStep2Url = `https://${host}/beanfun_block/game_zone/game_start_step2.aspx?service_code=${serviceCode}&service_region=${serviceRegion}&sotp=${serviceAccount.ssn}&dt=${getCurrentTime(2)}`
-  const gameStartStep2Response = await beanfunFetch(gameStartStep2Url)
-  const gameStartStep2HtmlStr = await gameStartStep2Response.text()
+  //? 取得otp前置需要的資料
+  const { longPollingKey, unkData, screatetime, pageUrl, launch } =
+    await getOTPStep1(serviceAccount, serviceCode, serviceRegion)
 
-  let match = gameStartStep2HtmlStr.match(/GetResultByLongPolling&key=(.*)"/)
-  if (!match) {
-    throw new Error("GetResultByLongPolling&key=?")
-  }
-  const longPollingKey = match[1]
-
-  // ===============================
-  // Step2: unkKey unkValue (TW only)
-  // ===============================
-  let unkKey: string | null = null
-  let unkValue: string | null = null
-  match = gameStartStep2HtmlStr.match(
-    /MyAccountData\.ServiceAccountCreateTime \+ "(.*)=(.*)";/
-  )
-  if (!match) {
-    console.log("OTPNoUnkData")
-    throw new Error("OTPNoUnkData")
-  }
-
-  unkKey = decodeURIComponent(match[1])
-  unkValue = decodeURIComponent(match[2])
-
-  // ===============================
-  // Step3: ServiceAccountCreateTime
-  // ===============================
   if (!serviceAccount.createTime) {
-    match = gameStartStep2HtmlStr.match(/ServiceAccountCreateTime: "([^"]+)"/)
-    if (!match) {
-      console.log("OTPNoCreateTime")
-      throw new Error("OTPNoCreateTime")
-    }
-    serviceAccount.createTime = match[1]
+    serviceAccount.createTime = screatetime
   }
 
-  // ===============================
-  // Step4: get_cookies.ashx → SecretCode
-  // ===============================
+  // ? get SecretCode legacy
+  /*console.log("Step4: get_cookies.ashx → SecretCode")
   const getCookiesResponse = await beanfunFetch(
-    `https://${loginHost}/generic_handlers/get_cookies.ashx`
+    `https://${BEAN_FUN_LOGIN_HOST}/generic_handlers/get_cookies.ashx`
   )
-
   const getCookiesHtmlStr = await getCookiesResponse.text()
-
-  match = getCookiesHtmlStr.match(/var m_strSecretCode = '(.*)';/)
+  const match = getCookiesHtmlStr.match(/var m_strSecretCode = '(.*)';/)
   if (!match) {
     console.log("OTPNoSecretCode")
     throw new Error("OTPNoSecretCode")
   }
   const secretCode = match[1]
+  */
 
-  // ===============================
-  // Step5: POST record_service_start
-  // ===============================
+  // ? next step record_start
   const payload: Record<string, string> = {
     service_code: serviceCode,
     service_region: serviceRegion,
@@ -195,79 +169,90 @@ async function getOTP(
     service_account_create_time: serviceAccount.createTime,
   }
 
+  let unkKey: string | null = null
+  let unkValue: string | null = null
+  // unkKey = decodeURIComponent(match[1])
+  // unkValue = decodeURIComponent(match[2])
+  unkKey = unkData[0]
+  unkValue = unkData[1]
   if (unkKey && unkValue) {
     payload[unkKey] = unkValue
   }
 
   await beanfunFetch(
-    `https://${host}/beanfun_block/generic_handlers/record_service_start.ashx`,
+    `https://${BEAN_FUN_HOST}/beanfun_block/generic_handlers/record_service_start.ashx`,
     {
       method: "POST",
       body: new URLSearchParams(payload).toString(),
+      referrer: pageUrl,
     }
   )
 
-  // ===============================
-  // Step6: LongPolling result
-  // ===============================
-  await beanfunFetch(
-    `https://${host}/generic_handlers/get_result.ashx?meth=GetResultByLongPolling&key=${longPollingKey}&_=${getCurrentTime()}`
-  )
+  // v2 登入流程，故意不送 secret code，也故意不做 long polling
+  // 確認 launcher 是否已經安裝 / 是否存在。
+  const integrity = await resolveClientIntegrity()
+  const decodedLaunchData = decodeLaunchData(launch.data)
 
-  // ===============================
-  // Step7: get_webstart_otp.ashx
-  // ===============================
-  const url =
-    `https://${host}/beanfun_block/generic_handlers/get_webstart_otp.ashx?` +
-    `SN=${longPollingKey}` +
-    `&WebToken=${webToken}` +
-    `&SecretCode=${secretCode}` +
-    `&ppppp=1F552AEAFF976018F942B13690C990F60ED01510DDF89165F1658CCE7BC21DBA` +
-    `&ServiceCode=${serviceCode}` +
-    `&ServiceRegion=${serviceRegion}` +
-    `&ServiceAccount=${serviceAccount.id}` +
-    `&CreateTime=${serviceAccount.createTime.replace(/ /g, "%20")}` +
-    `&d=${Math.floor(process.uptime() * 1000)}`
-  const getWebstartOtpResponse = await beanfunFetch(url)
-  const getWebstartOtpHtmlStr = await getWebstartOtpResponse.text()
+  switch (decodedLaunchData.kind) {
+    case "ticket":
+      {
+        try {
+          const postOTPResponse = await beanfunFetch(
+            `https://${BEAN_FUN_HOST}/beanfun_block/generic_handlers/get_webstart_otp_v2.ashx`,
+            {
+              referrer: pageUrl,
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                SN: launch.sn,
+                LaunchTicket: decodedLaunchData.ticket,
+                CV: integrity.cv,
+                Hash: integrity.hash,
+                arch: integrity.arch,
+              }),
+            }
+          )
 
-  if (!getWebstartOtpHtmlStr) {
-    console.log("OTPNoResponse")
-    throw new Error("OTPNoResponse")
+          if (postOTPResponse.status !== 200) {
+            throw new Error(`status: ${postOTPResponse.status}`)
+          }
+
+          const response = (await postOTPResponse.json()) as OtpV2Response
+          if (response.result !== 1) {
+            throw new Error(`result: ${response.result}`)
+          }
+
+          const encrypted = response.data
+          const key = encrypted.substring(0, 8)
+          const plainHex = encrypted.substring(8)
+
+          const decipher = crypto.createDecipheriv(
+            "des-ecb",
+            Buffer.from(key, "ascii"),
+            null
+          )
+
+          decipher.setAutoPadding(false)
+
+          let decrypted = decipher.update(Buffer.from(plainHex, "hex"))
+          decrypted = Buffer.concat([decrypted, decipher.final()])
+
+          const otp = decrypted.toString("utf8").replace(/\0/g, "").trim()
+          // console.log({ encrypted, key, decipher, otp })
+          return otp
+        } catch (error) {
+          console.log("error for postOTPResponse", error)
+        }
+      }
+      break
+    case "legacy":
+      throw new Error("not implement legacy action")
+    default:
+      throw new Error("mismatch decode kind")
   }
-
-  const parts = getWebstartOtpHtmlStr.split(";")
-  if (parts.length < 2) {
-    console.log("OTPNoResponse")
-    throw new Error("OTPNoResponse")
-  }
-  if (parts[0] !== "1") {
-    console.log("GetOtpError:", getWebstartOtpHtmlStr, parts[1])
-    throw new Error("GetOtpError")
-  }
-
-  // ===============================
-  // Step8: DES Decrypt OTP
-  // ===============================
-  const encrypted = parts[1]
-  const key = encrypted.substring(0, 8)
-  const plainHex = encrypted.substring(8)
-
-  const decipher = crypto.createDecipheriv(
-    "des-ecb",
-    Buffer.from(key, "ascii"),
-    null
-  )
-
-  decipher.setAutoPadding(false)
-
-  let decrypted = decipher.update(Buffer.from(plainHex, "hex"))
-  decrypted = Buffer.concat([decrypted, decipher.final()])
-
-  const otp = decrypted.toString("utf8").replace(/\0/g, "").trim()
-  // console.log({ parts, encrypted, key, decipher, otp })
-
-  return otp
+  return undefined
 }
 
 async function signOut() {
@@ -314,10 +299,10 @@ async function getInitLogin(pSkey: string): Promise<GetInitLoginResponse> {
   return responseJson
 }
 
-function getCurrentTime(method: number = 0): string {
+function getCurrentTime(method = 0): string {
   const date = new Date()
 
-  const pad = (n: number, len: number = 2) => n.toString().padStart(len, "0")
+  const pad = (n: number, len = 2) => n.toString().padStart(len, "0")
 
   switch (method) {
     case 1:
@@ -371,6 +356,73 @@ async function getCreateTime(
   if (!match) return null
 
   return match[1]
+}
+
+async function getOTPStep1(
+  serviceAccount: ServiceAccount,
+  serviceCode = "610074",
+  serviceRegion = "T9"
+) {
+  const url = `https://${BEAN_FUN_HOST}/beanfun_block/game_zone/game_start_step2.aspx?service_code=${serviceCode}&service_region=${serviceRegion}&sotp=${serviceAccount.ssn}&dt=${getCurrentTime(2)}`
+  const response = await beanfunFetch(url)
+  const html = await response.text()
+
+  let screatetime
+  let match = html.match(/GetResultByLongPolling&key=(.*)"/)
+  if (!match) {
+    throw new Error("GetResultByLongPolling&key=?")
+  }
+  const longPollingKey = match[1]
+
+  if (!serviceAccount.createTime) {
+    match = html.match(/ServiceAccountCreateTime: "([^"]+)"/)
+    if (!match) {
+      console.log("OTPNoCreateTime")
+      throw new Error("OTPNoCreateTime")
+    }
+    screatetime = match[1]
+  }
+
+  const block = html.match(/var m_objData\s*=\s*\{([\s\S]*?)\}/)[1]
+  const sn = block.match(/"sn":\s*"([^"]+)"/)[1]
+  const data = block.match(/"data":\s*"([^"]+)"/)[1]
+
+  const parseUnkData = (html: string) => {
+    const regex = /MyAccountData.ServiceAccountCreateTime \+ "(.*)=(.*)";/
+    const match = regex.exec(html)
+    if (!match) {
+      throw new Error("OtpMissingUnkData")
+    }
+
+    const rawKey = match[1] ?? ""
+    const rawValue = match[2] ?? ""
+
+    let key, value
+    try {
+      // decodeURIComponent 對應 percent_decode_str().decode_utf8()
+      key = decodeURIComponent(rawKey)
+      value = decodeURIComponent(rawValue)
+    } catch {
+      // decodeURIComponent 在遇到不合法的 %XX 序列會 throw URIError
+      throw new Error("OtpMissingUnkData")
+    }
+
+    return [key, value]
+  }
+
+  return {
+    longPollingKey,
+    unkData: parseUnkData(html),
+    screatetime,
+    pageUrl: url,
+    // m_objData
+    launch: {
+      sn,
+      data,
+      // web_token?
+      // secret_code?
+    },
+  }
 }
 
 export { getAccounts, getInitLogin, getOTP, pingToken, signOut }

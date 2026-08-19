@@ -1,6 +1,10 @@
 import { net } from "electron"
 
 type Options = RequestInit & { bypassCustomProtocolHandlers?: boolean }
+
+export const BEAN_FUN_HOST = "tw.beanfun.com"
+export const BEAN_FUN_LOGIN_HOST = "tw.newlogin.beanfun.com"
+
 export function beanfunFetch(url: string, options: Options = {}) {
   const defaultHeaders = {
     "User-Agent":
